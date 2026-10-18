@@ -47,15 +47,16 @@ py -3.13 -m venv .venv
 
 | Option | Environment | Purpose |
 |---|---|---|
-| `--checkpoint-dir` | `SA3_CHECKPOINT_DIR` | Local checkpoint: a model folder, a `model.safetensors`, or a folder with one subfolder per model (`medium`, `small-sfx`, `small-music`). The tokenizer is read from `t5gemma-b-b-ul2/` beside it. |
+| `--checkpoint-dir` | `SA3_CHECKPOINT_DIR` | Local checkpoint: a model folder, a `model.safetensors`, or a folder with one subfolder per model (`medium`, `small-sfx`, `small-music`). A model without a subfolder in such a folder uses, with a console notice, a checkpoint from the Hugging Face cache or else the weights of the official ONNX graph; any other path without a matching checkpoint is an error. The tokenizer is read from `t5gemma-b-b-ul2/` beside the checkpoint. |
 | `--no-checkpoint` | | Use the weights embedded in the official ONNX instead. |
 | `--onnx-dir` | | Local copy of the `onnx/` folder of the optimized repository. |
 | `--cache-dir` | `SA3_DML_CACHE` | DirectML-ready graphs (default: `models/` in this folder). |
 | `--offline` | | Never access the network. |
 | | `HF_HOME` | Hugging Face cache location. |
 
-Without `--checkpoint-dir` the Hugging Face cache is searched for the model checkpoint. Files fetched
-on first use:
+Without `--checkpoint-dir` or `SA3_CHECKPOINT_DIR` the Hugging Face cache is searched for the model
+checkpoint, and the weights of the official ONNX graph are used when there is none. Files fetched on
+first use:
 
 | Artifact | Download | Needed for |
 |---|---|---|
@@ -71,8 +72,9 @@ Medium, 0.9 GB per small model, 1.2 GB per SAME-L graph, 0.2 GB per SAME-S graph
 ## Usage
 
 ```powershell
+$env:SA3_CHECKPOINT_DIR = "path\to\StableAudio3"
 .venv\Scripts\python -m sa3_dml devices
-.venv\Scripts\python -m sa3_dml prepare --model medium --checkpoint-dir path\to\StableAudio3
+.venv\Scripts\python -m sa3_dml prepare --model medium
 
 # text-to-audio
 .venv\Scripts\python -m sa3_dml generate --model medium -p "A beautiful piano arpeggio grows into a cinematic climax" --duration 30 -o piano.wav
@@ -85,8 +87,8 @@ Medium, 0.9 GB per small model, 1.2 GB per SAME-L graph, 0.2 GB per SAME-S graph
 # inpainting, two regions
 .venv\Scripts\python -m sa3_dml generate --model medium -p "Punchy kick drum fill" --inpaint-audio input.wav --inpaint-start 4 --inpaint-end 8 --inpaint-start 16 --inpaint-end 20 --duration 30
 
-# continuation of a 10 s file up to 30 s
-.venv\Scripts\python -m sa3_dml generate --model small-music -p "Dreamy synth outro" --continue-audio input.wav --duration 30
+# continuation of a clip shorter than 30 s up to 30 s
+.venv\Scripts\python -m sa3_dml generate --model small-music -p "Dreamy synth outro" --continue-audio clip.wav --duration 30
 
 # LoRA: one adapter, or two stacked with their own strengths
 .venv\Scripts\python -m sa3_dml generate --model medium -p "Oldschool goa trance" --lora goa.safetensors --lora-strength 0.8
@@ -147,23 +149,22 @@ pipe.close()
 
 ## Performance
 
-AMD Radeon RX 7600, 8 steps, wall time including graph loading with the graphs in the OS file
-cache (a cold start also reads them from disk):
+AMD Radeon RX 7600 (8 GiB), 8 steps, process wall time including graph loading.
 
-| Model | Task | Audio | Time | VRAM (DiT stage) |
+| Model | Task | Audio | Time | VRAM (largest stage) |
 |---|---|---|---|---|
-| small-sfx | text-to-audio | 10 s | 8 s | 0.9 GiB |
+| small-sfx | text-to-audio | 10 s | 8–9 s | 0.9 GiB |
 | small-sfx | text-to-audio | 120 s | 11 s | 1.4 GiB |
-| small-music | audio-to-audio | 20 s | 13 s | 1.0 GiB |
-| small-music | continuation | 20 s → 40 s | 11 s | 1.0 GiB |
-| medium | text-to-audio | 30 s | 20 s | 2.9 GiB |
-| medium | audio-to-audio | 30 s | 27 s | 2.9 GiB |
-| medium | inpainting | 30 s | 25 s | 2.9 GiB |
-| medium | text-to-audio + LoRA (169 layers) | 30 s | 21 s | 2.9 GiB |
-| medium | text-to-audio | 120 s | 36 s | 3.8 GiB |
+| small-music | audio-to-audio | 20 s | 9–10 s | 1.0 GiB |
+| small-music | continuation | 20 s → 40 s | 10 s | 1.0 GiB |
+| medium | text-to-audio | 30 s | 18–19 s | 2.9 GiB |
+| medium | audio-to-audio | 30 s | 23 s | 2.9 GiB |
+| medium | inpainting | 30 s | 23 s | 2.9 GiB |
+| medium | text-to-audio + LoRA (169 layers) | 30 s | 21–22 s | 2.9 GiB |
+| medium | text-to-audio | 120 s | 34–35 s | 3.8 GiB |
 | medium | text-to-audio | 380 s | 71 s | 6.8 GiB |
-| SAME-S | encode / decode | 60 s | 4 s / 3 s | 0.7 GiB |
-| SAME-L | encode / decode | 60 s | 7 s / 7 s | 1.7 GiB |
+| SAME-S | encode / decode | 60 s | 2 s / 2 s | 0.7 GiB |
+| SAME-L | encode / decode | 60 s | 6 s / 6 s | 1.7 GiB |
 
 ## Graph adaptations
 

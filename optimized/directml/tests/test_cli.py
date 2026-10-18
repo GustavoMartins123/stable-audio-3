@@ -49,3 +49,31 @@ def test_lora_strengths():
                                                   "--lora-strength", "0.3", "--lora-index", "1"))] == [1.0, 0.3]
     with pytest.raises(ValueError):
         _lora_specs(_args("-p", "x", "--lora-strength", "0.5"))
+
+
+def test_checkpoint_folder_fallback_and_errors(tmp_path, monkeypatch):
+    import huggingface_hub
+    from sa3_dml.assets import AssetConfig, AssetError, Assets
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **k: None)
+    monkeypatch.delenv("SA3_CHECKPOINT_DIR", raising=False)
+    (tmp_path / "medium").mkdir()
+    (tmp_path / "medium" / "model.safetensors").write_bytes(b"")
+    logs = []
+
+    def assets(root):
+        return Assets(AssetConfig(cache_dir=tmp_path / "cache", checkpoint=root), log=logs.append)
+
+    shared = assets(tmp_path)
+    assert shared.checkpoint(MODELS["medium"]) == tmp_path / "medium" / "model.safetensors"
+    assert shared.checkpoint(MODELS["small-music"]) is None
+    assert shared.checkpoint(MODELS["small-music"]) is None
+    assert logs == [f"no small-music checkpoint under {tmp_path}: using the weights of the official ONNX graph"]
+
+    (tmp_path / "small-sfx").mkdir()
+    (tmp_path / "medium" / "model_config.json").write_text(
+        '{"model": {"conditioning": {"configs": [{"config": {"repo_id": "stabilityai/stable-audio-3-medium"}}]}}}')
+    for root, model in ((tmp_path, "small-sfx"), (tmp_path / "missing", "medium"),
+                        (tmp_path / "small-sfx", "small-sfx"), (tmp_path / "medium", "small-music")):
+        with pytest.raises(AssetError):
+            assets(root).checkpoint(MODELS[model])

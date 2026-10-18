@@ -12,7 +12,17 @@ from pathlib import Path
 import onnx
 
 from . import surgery
-from .specs import AUDIO_CHANNELS, CODECS, ONNX_REPO, T5_FILES, TOKENIZER_FILE, CodecSpec, ModelSpec, checkpoint_key
+from .specs import (
+    AUDIO_CHANNELS,
+    CODECS,
+    MODELS,
+    ONNX_REPO,
+    T5_FILES,
+    TOKENIZER_FILE,
+    CodecSpec,
+    ModelSpec,
+    checkpoint_key,
+)
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
@@ -50,6 +60,7 @@ class Assets:
     def __init__(self, config: AssetConfig, log: Callable[[str], None] = print):
         self.config = config
         self.log = log
+        self._checkpoints: dict[str, Path | None] = {}
 
     def fetch(self, repo_file: str, repo_id: str = ONNX_REPO) -> Path:
         """Path to a file of an official repo, from --onnx-dir or the Hugging Face cache."""
@@ -76,19 +87,37 @@ class Assets:
                              "repositories require accepting the license and `hf auth login`.") from exc
 
     def checkpoint(self, model: ModelSpec) -> Path | None:
-        """Local safetensors checkpoint for a model, if one is configured or cached."""
+        """Local safetensors checkpoint for a model, if one is configured or cached.
+
+        A configured folder that holds only other models' checkpoints falls back, with a notice, to
+        the Hugging Face cache and then to the weights of the official ONNX graph. Any other
+        configured path without a matching checkpoint is an error.
+        """
         if not self.config.use_checkpoint:
             return None
+        if model.name not in self._checkpoints:
+            self._checkpoints[model.name] = self._resolve_checkpoint(model)
+        return self._checkpoints[model.name]
+
+    def _resolve_checkpoint(self, model: ModelSpec) -> Path | None:
         root = self.config.checkpoint or os.environ.get("SA3_CHECKPOINT_DIR")
         if root:
-            found = _find_checkpoint(Path(root), model)
-            if found is None:
+            root = Path(root)
+            if not root.exists():
+                raise AssetError(f"checkpoint path {root} does not exist")
+            found = _find_checkpoint(root, model)
+            if found is not None:
+                _check_identity(found, model)
+                return found
+            if not _holds_other_models(root, model):
                 raise AssetError(f"no {model.name} checkpoint (model.safetensors) under {root}")
-            _check_identity(found, model)
-            return found
         from huggingface_hub import try_to_load_from_cache
         cached = try_to_load_from_cache(model.repo_id, "model.safetensors")
-        return Path(cached) if isinstance(cached, str) else None
+        found = Path(cached) if isinstance(cached, str) else None
+        if root:
+            source = found or "the weights of the official ONNX graph"
+            self.log(f"no {model.name} checkpoint under {root}: using {source}")
+        return found
 
     def tokenizer(self, model: ModelSpec) -> Path:
         ckpt = self.checkpoint(model)
@@ -162,15 +191,26 @@ class Assets:
         return graph
 
 
+def _folder_names(model: ModelSpec) -> list[str]:
+    return [model.name, model.repo_id.split("/")[-1]]
+
+
 def _find_checkpoint(root: Path, model: ModelSpec) -> Path | None:
     if root.is_file():
         return root
-    names = [model.name, model.repo_id.split("/")[-1]]
-    for candidate in [root, *(root / n for n in names)]:
+    for candidate in [root, *(root / n for n in _folder_names(model))]:
         path = candidate / "model.safetensors"
         if path.is_file():
             return path
     return None
+
+
+def _holds_other_models(root: Path, model: ModelSpec) -> bool:
+    """True for a folder of per-model checkpoints that simply has none for `model`."""
+    if not root.is_dir() or any((root / n).exists() for n in _folder_names(model)):
+        return False
+    return any((root / n / "model.safetensors").is_file()
+               for other in MODELS.values() if other.name != model.name for n in _folder_names(other))
 
 
 def _check_identity(ckpt: Path, model: ModelSpec) -> None:
