@@ -164,3 +164,43 @@ def test_set_initializer_casts_and_checks_shape():
     assert init.data_type == TensorProto.FLOAT16 and numpy_helper.to_array(init).sum() == 4
     with pytest.raises(ValueError):
         surgery.set_initializer(init, np.ones((3, 2), np.float32))
+
+
+def test_encoder_token_noise_and_input_dims():
+    frames, channels = 4, 3
+    tokens = numpy_helper.from_array(np.zeros((1, 1, channels), np.float32), "new_tokens")
+    shape = numpy_helper.from_array(np.array([frames, 1, channels], np.int64), "shape")
+    nodes = [helper.make_node("Expand", ["new_tokens", "shape"], ["tok"]),
+             helper.make_node("ReduceSum", ["audio"], ["s"], keepdims=0),
+             helper.make_node("Add", ["tok", "s"], ["latent"])]
+    model = _model(nodes, [helper.make_tensor_value_info("audio", TensorProto.FLOAT, [1, 2, "T_samples"])],
+                   [helper.make_tensor_value_info("latent", TensorProto.FLOAT, None)], [tokens, shape])
+    assert surgery.add_token_noise(model, tokens_per_frame=1)
+    surgery.name_input_dims(model, "audio", [1, 2, "N"])
+    inputs = {i.name: [d.dim_param or d.dim_value for d in i.type.tensor_type.shape.dim] for i in model.graph.input}
+    assert inputs == {"audio": [1, 2, "N"], surgery.TOKEN_NOISE_INPUT: [surgery.TOKEN_ROWS, 1, channels]}
+    noise = np.arange(frames * channels, dtype=np.float32).reshape(frames, 1, channels)
+    out = _run(model, {"audio": np.zeros((1, 2, 8), np.float32), surgery.TOKEN_NOISE_INPUT: noise},
+               dims={"N": 8, surgery.TOKEN_ROWS: frames})[0]
+    np.testing.assert_array_equal(out, noise)
+
+
+def test_zero_padded_frames_masks_projected_padding():
+    weight = numpy_helper.from_array(np.ones((3, 2), np.float32), "proj.weight")
+    bias = numpy_helper.from_array(np.full(3, 0.5, np.float32), "proj.bias")
+    pads = numpy_helper.from_array(np.array([0, 0, 0, 0, 0, 1], np.int64), "pads")
+    nodes = [helper.make_node("Pad", ["latent", "pads"], ["padded"], mode="edge"),
+             helper.make_node("Transpose", ["padded"], ["seq"], perm=[0, 2, 1]),
+             helper.make_node("Transpose", ["proj.weight"], ["wt"]),
+             helper.make_node("MatMul", ["seq", "wt"], ["mm"]),
+             helper.make_node("Add", ["proj.bias", "mm"], ["features"]),
+             helper.make_node("Identity", ["features"], ["out"])]
+    model = _model(nodes, [helper.make_tensor_value_info("latent", TensorProto.FLOAT, [1, 2, "L"])],
+                   [helper.make_tensor_value_info("out", TensorProto.FLOAT, None)], [weight, bias, pads])
+    assert surgery.zero_padded_frames(model)
+    out = _run(model, {"latent": np.ones((1, 2, 3), np.float32)}, dims={"L": 3})[0]
+    np.testing.assert_allclose(out[0, :3], 2.5)
+    np.testing.assert_array_equal(out[0, 3], 0.0)
+    assert not surgery.zero_padded_frames(_model([helper.make_node("Identity", ["latent"], ["out"])],
+                                                 [helper.make_tensor_value_info("latent", TensorProto.FLOAT, None)],
+                                                 [helper.make_tensor_value_info("out", TensorProto.FLOAT, None)]))

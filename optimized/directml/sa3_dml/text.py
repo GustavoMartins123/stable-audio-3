@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .session import RuntimeConfig, Session
+from .session import SessionPool
 from .specs import TEXT_TOKENS
 
 
@@ -34,14 +34,14 @@ class Tokenizer:
 
 
 class TextEncoder:
-    def __init__(self, graph: Path, tokenizer: Path, runtime: RuntimeConfig):
+    role = "text"
+
+    def __init__(self, graph: Path, tokenizer: Path, pool: SessionPool):
+        self.graph = graph
         self.tokenizer = Tokenizer(tokenizer)
-        self.session = Session(graph, runtime, name="t5gemma")
+        self.pool = pool
 
     def encode(self, text: str) -> PromptEmbedding:
         ids, mask = self.tokenizer(text)
-        hidden = self.session.run({"input_ids": ids, "attention_mask": mask})[0]
+        hidden = self.pool.get(self.role, self.graph).run({"input_ids": ids, "attention_mask": mask})[0]
         return PromptEmbedding(hidden.astype(np.float32), mask.astype(np.float32))
-
-    def close(self):
-        return self.session.close()

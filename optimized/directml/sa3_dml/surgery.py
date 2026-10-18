@@ -13,6 +13,7 @@ SWA_HEAD_DIM = 64
 CROSS_ATTN_TOKENS = 257
 CROSS_ATTN_SCALE_INPUT = "cross_attn_scale"
 TOKEN_NOISE_INPUT = "token_noise"
+TOKEN_ROWS = "R"
 TOKENS_PER_FRAME = 16
 AUDIO_OUTPUT = "audio"
 _MASK_VALUE = -1.0e9
@@ -175,11 +176,13 @@ def remove_random_normal(model: onnx.ModelProto) -> int:
         removed += 1
 
 
-def add_token_noise(model: onnx.ModelProto) -> bool:
-    """Add a `token_noise` [L, 16, C] input that is added to the decoder's learned upsampling tokens.
+def add_token_noise(model: onnx.ModelProto, tokens_per_frame: int = TOKENS_PER_FRAME) -> bool:
+    """Add a `token_noise` [R, tokens_per_frame, C] input that is added to the learned SAME tokens.
 
-    The reference SAME decoder perturbs these tokens with Gaussian noise (`mask_noise`) at
-    inference too; the exported graphs dropped it. The caller passes noise already scaled.
+    The reference SAME blocks perturb these tokens with Gaussian noise (`mask_noise`) at
+    inference too; the exported graphs dropped it. The decoder appends 16 tokens per latent
+    frame, the encoder one; R is the latent length after the block's own chunk padding.
+    The caller passes noise already scaled.
     """
     graph = model.graph
     if any(inp.name == TOKEN_NOISE_INPUT for inp in graph.input):
@@ -202,8 +205,72 @@ def add_token_noise(model: onnx.ModelProto) -> bool:
     nodes[position + 1:position + 1] = b.nodes
     _set_nodes(graph, nodes)
     graph.input.append(helper.make_tensor_value_info(
-        TOKEN_NOISE_INPUT, TensorProto.FLOAT, ["L", TOKENS_PER_FRAME, int(init.dims[-1])]))
+        TOKEN_NOISE_INPUT, TensorProto.FLOAT, [TOKEN_ROWS, tokens_per_frame, int(init.dims[-1])]))
     return True
+
+
+def zero_padded_frames(model: onnx.ModelProto, latent_input: str = "latent") -> bool:
+    """Zero the projected features of the frames a SAME decoder adds to fill its attention chunks.
+
+    The exported graph edge-pads the latent input before the latent projection; the reference
+    decoder pads the projected sequence with zeros. A frame mask after the projection restores
+    that. Returns False when the graph does not pad its input.
+    """
+    graph = model.graph
+    pad = next((n for n in graph.node if n.op_type == "Pad" and n.input[0] == latent_input), None)
+    if pad is None:
+        return False
+    initializers = {i.name for i in graph.initializer}
+    producers = _producers(graph)
+    consumers = _consumers(graph)
+    frontier, seen, matmul = [pad.output[0]], set(), None
+    while frontier and matmul is None:
+        name = frontier.pop(0)
+        for node in consumers.get(name, []):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            weight = [i for i in node.input if i != name and i in producers
+                      and producers[i].op_type == "Transpose" and producers[i].input[0] in initializers]
+            if node.op_type == "MatMul" and weight:
+                matmul = node
+                break
+            frontier.extend(node.output)
+    if matmul is None:
+        raise ValueError("latent projection after the input padding not found")
+    add = next(n for n in consumers[matmul.output[0]] if n.op_type == "Add")
+    features = add.output[0]
+    users = consumers.get(features, [])
+
+    b = _Builder(graph, "/zero_padded_frames")
+    length = b.one("Gather", [b.one("Shape", [latent_input]), b.const([2])], axis=0)
+    padded = b.one("Squeeze", [b.one("Gather", [b.one("Shape", [features]), b.const([1])], axis=0)])
+    frames = b.one("Range", [b.const(0), padded, b.const(1)])
+    keep = b.one("CastLike", [b.one("Less", [frames, length]), features])
+    keep = b.one("Reshape", [keep, b.const([1, -1, 1])])
+    masked = b.one("Mul", [features, keep])
+    for node in users:
+        for i, name in enumerate(node.input):
+            if name == features:
+                node.input[i] = masked
+    nodes = list(graph.node)
+    index = _index_of(nodes, features) + 1
+    nodes[index:index] = b.nodes
+    _set_nodes(graph, nodes)
+    return True
+
+
+def name_input_dims(model: onnx.ModelProto, name: str, dims: list[int | str]) -> None:
+    """Give a graph input's dimensions fixed sizes or the given symbolic names."""
+    value = next(i for i in model.graph.input if i.name == name)
+    shape = value.type.tensor_type.shape
+    if len(shape.dim) != len(dims):
+        raise ValueError(f"{name} has rank {len(shape.dim)}, expected {len(dims)}")
+    for dim, size in zip(shape.dim, dims):
+        if isinstance(size, str):
+            dim.dim_param = size
+        else:
+            dim.dim_value = size
 
 
 def expose_float_audio(model: onnx.ModelProto) -> None:

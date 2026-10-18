@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 
 from .sampling import guided_velocity
-from .session import RuntimeConfig, Session
+from .session import Session
 from .specs import LATENT_DIM
 from .surgery import CROSS_ATTN_SCALE_INPUT, CROSS_ATTN_TOKENS
 from .text import PromptEmbedding
@@ -19,18 +17,22 @@ class DiT:
     cfg_scale == 1 runs one forward per step. Otherwise each step runs the conditional branch
     and an unconditional one, which uses an all-zero cross-attention sequence or, with a
     negative prompt, its embeddings with padded tokens zeroed, as in the reference sampler.
+    `local_add_cond` [1, 257, L] carries the inpainting mask and masked source latents and is
+    shared by both branches.
     """
 
-    def __init__(self, graph: Path, runtime: RuntimeConfig, length: int, prompt: PromptEmbedding,
-                 seconds: float, negative: PromptEmbedding | None = None, cfg_scale: float = 1.0,
-                 apg_scale: float = 1.0):
-        self.session = Session(graph, runtime, dims={"L": length}, name="dit")
+    def __init__(self, session: Session, length: int, prompt: PromptEmbedding, seconds: float,
+                 negative: PromptEmbedding | None = None, cfg_scale: float = 1.0, apg_scale: float = 1.0,
+                 local_add_cond: np.ndarray | None = None):
+        self.session = session
         self.cfg_scale = float(cfg_scale)
         self.apg_scale = float(apg_scale)
         self.forwards = 0
+        if local_add_cond is None:
+            local_add_cond = np.zeros((1, LATENT_DIM + 1, length), np.float32)
         common = {
             "seconds_total": np.array([seconds], np.float32),
-            "local_add_cond": np.zeros((1, LATENT_DIM + 1, length), np.float32),
+            "local_add_cond": np.asarray(local_add_cond, np.float32),
         }
         ones = np.ones((1, CROSS_ATTN_TOKENS, 1), np.float32)
         self.cond = {**common, "t5_hidden": prompt.hidden, "t5_mask": prompt.mask,
@@ -53,6 +55,3 @@ class DiT:
             return v_cond
         v_uncond = self._forward(self.uncond, x, t)
         return guided_velocity(x, t, v_cond, v_uncond, self.cfg_scale, self.apg_scale)
-
-    def close(self):
-        return self.session.close()

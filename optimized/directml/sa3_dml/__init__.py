@@ -1,5 +1,7 @@
 """Stable Audio 3 inference on ONNX Runtime with the DirectML execution provider."""
 
-from .pipeline import Pipeline, Request, Result
+from .audio import Audio
+from .lora import LoraSpec
+from .pipeline import Autoencoder, Pipeline, Request, Result
 
-__all__ = ["Pipeline", "Request", "Result"]
+__all__ = ["Audio", "Autoencoder", "LoraSpec", "Pipeline", "Request", "Result"]

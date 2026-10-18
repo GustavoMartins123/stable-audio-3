@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -29,6 +29,22 @@ def valid_length(seconds: float, total: int, padding: float = DURATION_PADDING_S
     """
     effective = -(-int(seconds * SAMPLE_RATE) // DOWNSAMPLING_RATIO)
     return min(effective + int(padding * SAMPLE_RATE / DOWNSAMPLING_RATIO), total)
+
+
+def keep_mask(length: int, regions: Sequence[tuple[float, float]], duration: float) -> np.ndarray:
+    """Inpainting mask [1, 1, length] of the reference: 1 keeps the source latent, 0 regenerates it.
+
+    Regions are cut at sample resolution and everything past `duration` is regenerated; latent
+    frame i takes the value at sample i * 4096 (nearest-neighbour downsampling).
+    """
+    positions = np.arange(length, dtype=np.int64) * DOWNSAMPLING_RATIO
+    total = length * DOWNSAMPLING_RATIO
+    keep = np.ones(length, np.float32)
+    for start, end in regions:
+        lo, hi = min(int(start * SAMPLE_RATE), total), min(int(end * SAMPLE_RATE), total)
+        keep[(positions >= lo) & (positions < hi)] = 0.0
+    keep[positions >= int(duration * SAMPLE_RATE)] = 0.0
+    return keep.reshape(1, 1, length)
 
 
 def schedule(steps: int, sigma_max: float = 1.0) -> np.ndarray:

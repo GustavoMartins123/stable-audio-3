@@ -37,6 +37,10 @@ class Placement:
     kernels: Counter = field(default_factory=Counter)
     cpu_ops: Counter = field(default_factory=Counter)
 
+    def merge(self, other: Placement) -> None:
+        self.kernels.update(other.kernels)
+        self.cpu_ops.update(other.cpu_ops)
+
     def describe(self) -> str:
         parts = [f"{provider.replace('ExecutionProvider', '')}={count}"
                  for provider, count in sorted(self.kernels.items())]
@@ -65,10 +69,14 @@ class RuntimeConfig:
 
 
 class Session:
-    """InferenceSession wrapper with static-shape binding and optional placement profiling."""
+    """InferenceSession wrapper with static-shape binding and optional placement profiling.
+
+    `initializers` replaces externally stored graph weights by name before graph optimization,
+    so the graph file itself is never rewritten.
+    """
 
     def __init__(self, path: Path | str, config: RuntimeConfig, dims: dict[str, int] | None = None,
-                 name: str | None = None):
+                 name: str | None = None, initializers: dict[str, np.ndarray] | None = None):
         self.name = name or Path(path).stem
         options = ort.SessionOptions()
         options.log_severity_level = config.log_level
@@ -78,6 +86,10 @@ class Session:
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         for dim, value in (dims or {}).items():
             options.add_free_dimension_override_by_name(dim, int(value))
+        self._weights = [ort.OrtValue.ortvalue_from_numpy(np.ascontiguousarray(a))
+                         for a in (initializers or {}).values()]
+        if self._weights:
+            options.add_external_initializers(list(initializers), self._weights)
         self._profile_dir = None
         if config.profile:
             self._profile_dir = tempfile.mkdtemp(prefix="sa3_dml_profile_")
@@ -112,8 +124,35 @@ class Session:
                 pass
         self.session = None
         self.inputs = {}
+        self._weights = []
         gc.collect()
         return self.placement
+
+
+class SessionPool:
+    """Keeps at most one session per role, reused while its graph, shape and weights are unchanged."""
+
+    def __init__(self, config: RuntimeConfig):
+        self.config = config
+        self._sessions: dict[str, tuple[tuple, Session]] = {}
+        self.placements: dict[str, Placement] = {}
+
+    def get(self, role: str, path: Path | str, dims: dict[str, int] | None = None,
+            initializers: dict[str, np.ndarray] | None = None, key: object = None) -> Session:
+        ident = (str(path), tuple(sorted((dims or {}).items())), key)
+        current = self._sessions.get(role)
+        if current is not None and current[0] == ident:
+            return current[1]
+        self.release(role)
+        session = Session(path, self.config, dims, name=role, initializers=initializers)
+        self._sessions[role] = (ident, session)
+        return session
+
+    def release(self, role: str | None = None) -> None:
+        for name in [role] if role is not None else list(self._sessions):
+            entry = self._sessions.pop(name, None)
+            if entry is not None:
+                self.placements.setdefault(name, Placement()).merge(entry[1].close())
 
 
 def read_placement(profile_path: str) -> Placement:

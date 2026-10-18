@@ -18,11 +18,17 @@ TOKENIZER_FILE = "t5gemma-b-b-ul2/tokenizer.json"
 
 @dataclass(frozen=True)
 class CodecSpec:
+    """SAME autoencoder. `token_noise` / `encoder_token_noise` are the reference `mask_noise` of
+    the decoder and encoder; `frame_align` is the latent granularity of its attention chunks."""
+
     name: str
     decoder_files: tuple[str, ...]
+    encoder_files: tuple[str, ...]
     token_noise: float
-    decode_chunk: int = 128
-    decode_overlap: int = 32
+    encoder_token_noise: float
+    frame_align: int = 1
+    chunk: int = 128
+    overlap: int = 32
 
 
 @dataclass(frozen=True)
@@ -39,8 +45,10 @@ class ModelSpec:
 
 
 CODECS: dict[str, CodecSpec] = {
-    "same-l": CodecSpec("same-l", ("onnx/same-l/dec_fp16.onnx",), token_noise=0.1),
-    "same-s": CodecSpec("same-s", ("onnx/same-s/dec_bf16.onnx",), token_noise=0.01),
+    "same-l": CodecSpec("same-l", ("onnx/same-l/dec_fp16.onnx",), ("onnx/same-l/enc_fp16.onnx",),
+                        token_noise=0.1, encoder_token_noise=0.001),
+    "same-s": CodecSpec("same-s", ("onnx/same-s/dec_bf16.onnx",), ("onnx/same-s/enc_bf16.onnx",),
+                        token_noise=0.01, encoder_token_noise=0.0, frame_align=2),
 }
 
 MODELS: dict[str, ModelSpec] = {

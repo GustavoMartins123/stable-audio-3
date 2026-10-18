@@ -12,14 +12,20 @@ from pathlib import Path
 import onnx
 
 from . import surgery
-from .specs import CODECS, ONNX_REPO, T5_FILES, TOKENIZER_FILE, CodecSpec, ModelSpec, checkpoint_key
+from .specs import AUDIO_CHANNELS, CODECS, ONNX_REPO, T5_FILES, TOKENIZER_FILE, CodecSpec, ModelSpec, checkpoint_key
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-PREPARE_VERSION = 2
+DIT_VERSION = 2
+DECODER_VERSION = 4
+ENCODER_VERSION = 1
 GRAPH_NAME = "model.onnx"
 STAMP_NAME = "prepared.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+
+
+ENCODER_INPUT = "audio"
+ENCODER_SAMPLES = "N"
 
 
 class AssetError(RuntimeError):
@@ -98,7 +104,7 @@ class Assets:
     def dit(self, model: ModelSpec) -> Path:
         ckpt = self.checkpoint(model)
         files = [model.dit_files[0]] if ckpt is not None else list(model.dit_files)
-        return self._prepared(f"dit-{model.name}", files, ckpt, model, surgery.add_cross_attn_scale)
+        return self._prepared(f"dit-{model.name}", DIT_VERSION, files, ckpt, surgery.add_cross_attn_scale)
 
     def decoder(self, codec: CodecSpec | str) -> Path:
         codec = CODECS[codec] if isinstance(codec, str) else codec
@@ -106,17 +112,29 @@ class Assets:
         def transform(m: onnx.ModelProto) -> None:
             surgery.replace_swa_attention(m)
             surgery.remove_random_normal(m)
+            surgery.zero_padded_frames(m)
             if not surgery.add_token_noise(m):
                 raise AssetError(f"{codec.name} decoder graph has no learned upsampling tokens")
             surgery.expose_float_audio(m)
 
-        return self._prepared(f"decoder-{codec.name}", list(codec.decoder_files), None, None, transform)
+        return self._prepared(f"decoder-{codec.name}", DECODER_VERSION, list(codec.decoder_files), None, transform)
 
-    def _prepared(self, key: str, files: list[str], ckpt: Path | None, model: ModelSpec | None,
+    def encoder(self, codec: CodecSpec | str) -> Path:
+        codec = CODECS[codec] if isinstance(codec, str) else codec
+
+        def transform(m: onnx.ModelProto) -> None:
+            surgery.replace_swa_attention(m)
+            surgery.name_input_dims(m, ENCODER_INPUT, [1, AUDIO_CHANNELS, ENCODER_SAMPLES])
+            if codec.encoder_token_noise and not surgery.add_token_noise(m, tokens_per_frame=1):
+                raise AssetError(f"{codec.name} encoder graph has no learned downsampling tokens")
+
+        return self._prepared(f"encoder-{codec.name}", ENCODER_VERSION, list(codec.encoder_files), None, transform)
+
+    def _prepared(self, key: str, version: int, files: list[str], ckpt: Path | None,
                   transform: Callable[[onnx.ModelProto], None]) -> Path:
         target = Path(self.config.cache_dir) / key
         stamp = {
-            "version": PREPARE_VERSION,
+            "version": version,
             "sources": files,
             "revision": self.config.revision,
             "weights": _file_identity(ckpt) if ckpt is not None else "onnx",
