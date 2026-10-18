@@ -8,11 +8,14 @@ minimal-dependency way to run SA3 on a given accelerator. Pick by hardware:
 | **[mlx](mlx)** | Apple Silicon Macs | Metal GPU (MLX) | ✅ | ✅ `./sa3-gradio` | ✅ LoRA (pure-MLX) |
 | **[tflite](tflite)** | macOS / Linux / Windows, x86 & ARM | CPU (LiteRT / XNNPACK) | ✅ | ✅ `./sa3-gradio` | LoRA *inference* only (weight-patching) |
 | **[tensorRT](tensorRT)** | Linux + NVIDIA GPU | CUDA / TensorRT | ✅ | — | LoRA *inference* only (runtime low-rank branch) |
+| **[directml](directml)** | Windows 10/11 + DirectX 12 GPU | DirectML (ONNX Runtime) | ✅ text-to-audio | — | — |
 
-All three read the same weights from
+The mlx, tflite and tensorRT runtimes read the same weights from
 [`stabilityai/stable-audio-3-optimized`](https://huggingface.co/stabilityai/stable-audio-3-optimized)
 (auto-downloaded on first use) and cover text-to-audio, audio-to-audio,
-inpainting, and CFG / negative-prompt guidance.
+inpainting, and CFG / negative-prompt guidance. The directml runtime runs the
+ONNX graphs from the same repository, or binds local checkpoint weights into
+them, and covers text-to-audio with CFG / negative-prompt guidance.
 
 ## One-liners
 
